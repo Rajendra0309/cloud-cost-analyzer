@@ -2,3 +2,4 @@ pandas
 streamlit
 plotly
 fpdf2
+altair==4.2.2
