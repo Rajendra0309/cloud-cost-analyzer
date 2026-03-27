@@ -10,6 +10,9 @@ import cost_analyzer
 import recommendations as rec_engine
 import report_generator
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SAMPLE_DATA_PATH = os.path.join(BASE_DIR, "data", "sample_data.csv")
+
 # PAGE CONFIG
 st.set_page_config(
     page_title="Cloud Cost Analyzer",
@@ -92,8 +95,12 @@ with st.sidebar:
         raw_df['date'] = pd.to_datetime(raw_df['date'])
         st.success("✅ Custom file loaded!")
     else:
-        raw_df = data_loader.load_data("data/sample_data.csv")
-        st.info("ℹ️ Using sample dataset")
+        if os.path.exists(SAMPLE_DATA_PATH):
+            raw_df = data_loader.load_data(SAMPLE_DATA_PATH)
+            st.info("ℹ️ Using sample dataset")
+        else:
+            st.error("⚠️ Sample data file not found. Please upload a CSV file.")
+            st.stop()
 
     st.markdown("---")
 
