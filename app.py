@@ -90,10 +90,12 @@ with st.sidebar:
     )
 
     if uploaded_file is not None:
-        import io
-        raw_df = pd.read_csv(uploaded_file)
-        raw_df['date'] = pd.to_datetime(raw_df['date'])
-        st.success("✅ Custom file loaded!")
+        try:
+            raw_df = data_loader.load_uploaded_data(uploaded_file)
+            st.success("✅ Custom file loaded!")
+        except Exception as e:
+            st.error(f"⚠️ Could not process uploaded CSV: {e}")
+            st.stop()
     else:
         if os.path.exists(SAMPLE_DATA_PATH):
             raw_df = data_loader.load_data(SAMPLE_DATA_PATH)

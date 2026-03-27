@@ -14,6 +14,130 @@ REQUIRED_COLUMNS = {
     'storage_gb': 'float'
 }
 
+
+def _coerce_and_clean(df):
+    """Apply type coercion and standard cleanup on canonical schema."""
+    df = df.copy()
+
+    df['date'] = pd.to_datetime(df['date'], errors='coerce')
+    df['cost_usd'] = pd.to_numeric(df['cost_usd'], errors='coerce')
+    df['usage_hours'] = pd.to_numeric(df['usage_hours'], errors='coerce')
+    df['cpu_utilization'] = pd.to_numeric(df['cpu_utilization'], errors='coerce')
+    df['storage_gb'] = pd.to_numeric(df['storage_gb'], errors='coerce')
+
+    before = len(df)
+    df = df.dropna(subset=['date', 'cost_usd', 'resource_id'])
+    dropped = before - len(df)
+    if dropped > 0:
+        print(f"[data_loader] Warning: Dropped {dropped} rows with null values.")
+
+    df['service'] = df['service'].astype(str).str.strip()
+    df['region'] = df['region'].astype(str).str.strip()
+    df['resource_id'] = df['resource_id'].astype(str).str.strip()
+    df['status'] = df['status'].astype(str).str.strip().str.capitalize()
+
+    return df.sort_values('date').reset_index(drop=True)
+
+
+def _normalize_native_schema(df):
+    """Normalize an already-detailed billing schema to canonical column names."""
+    col_map = {c.lower().strip(): c for c in df.columns}
+    if not all(col in col_map for col in REQUIRED_COLUMNS):
+        return None
+
+    normalized = pd.DataFrame({
+        col: df[col_map[col]] for col in REQUIRED_COLUMNS
+    })
+    return normalized
+
+
+def _normalize_aws_cost_explorer_schema(df):
+    """Convert AWS Cost Explorer monthly export (wide format) into canonical long format."""
+    if 'Service' not in df.columns:
+        return None
+
+    money_cols = [
+        c for c in df.columns
+        if c.endswith('($)') and c != 'Total costs($)'
+    ]
+    if not money_cols:
+        return None
+
+    working = df.copy()
+    working['date'] = pd.to_datetime(
+        working['Service'],
+        format='%Y-%m-%d',
+        errors='coerce'
+    )
+    working = working[working['date'].notna()].copy()
+
+    if working.empty:
+        return None
+
+    long_df = working.melt(
+        id_vars=['date'],
+        value_vars=money_cols,
+        var_name='service',
+        value_name='cost_usd'
+    )
+    long_df['cost_usd'] = pd.to_numeric(long_df['cost_usd'], errors='coerce').fillna(0.0)
+
+    # Keep only rows that carry spend signal.
+    long_df = long_df[long_df['cost_usd'] != 0].copy()
+    if long_df.empty:
+        # Preserve a valid empty-shaped frame for downstream UI handling.
+        long_df = pd.DataFrame(columns=['date', 'service', 'cost_usd'])
+
+    if not long_df.empty:
+        long_df['service'] = (
+            long_df['service']
+            .str.replace('($)', '', regex=False)
+            .str.strip()
+        )
+        long_df['service'] = long_df['service'].replace({
+            'EC2-Instances': 'EC2',
+            'EC2-Other': 'EC2'
+        })
+
+    long_df['region'] = 'global'
+    long_df['usage_hours'] = 0.0
+    long_df['status'] = 'Active'
+    long_df['cpu_utilization'] = 0.0
+    long_df['storage_gb'] = 0.0
+
+    if long_df.empty:
+        long_df['resource_id'] = pd.Series(dtype='object')
+    else:
+        long_df['resource_id'] = [
+            f"aws-billing-{idx+1}" for idx in range(len(long_df))
+        ]
+
+    return long_df[[
+        'date', 'service', 'region', 'cost_usd',
+        'usage_hours', 'resource_id', 'status',
+        'cpu_utilization', 'storage_gb'
+    ]]
+
+
+def normalize_billing_df(df):
+    """
+    Accepts either canonical app schema or AWS Cost Explorer export,
+    and returns canonical schema required by the analyzer.
+    """
+    native = _normalize_native_schema(df)
+    if native is not None:
+        return _coerce_and_clean(native)
+
+    aws_export = _normalize_aws_cost_explorer_schema(df)
+    if aws_export is not None:
+        return _coerce_and_clean(aws_export)
+
+    raise ValueError(
+        "Unsupported CSV format. Upload either the app schema with columns "
+        f"{list(REQUIRED_COLUMNS.keys())} or an AWS Cost Explorer export "
+        "that includes a 'Service' column and service cost columns ending with '($)'."
+    )
+
 # Load + validate CSV
 def load_data(filepath):
     """
@@ -35,38 +159,17 @@ def load_data(filepath):
     except Exception as e:
         raise ValueError(f"Could not read CSV file: {e}")
     
-    # Validate required columns
-    missing = [col for col in REQUIRED_COLUMNS if col not in df.columns]
-    if missing:
-        raise ValueError(
-            f"Missing required columns: {missing}\n"
-            f"Your CSV must have: {list(REQUIRED_COLUMNS.keys())}"
-        )
-    
-    # Clean & cast column types
-    df['date'] = pd.to_datetime(df['date'], errors='coerce')
-    df['cost_usd'] = pd.to_numeric(df['cost_usd'], errors='coerce')
-    df['usage_hours'] = pd.to_numeric(df['usage_hours'], errors='coerce')
-    df['cpu_utilization'] = pd.to_numeric(df['cpu_utilization'], errors='coerce')
-    df['storage_gb'] = pd.to_numeric(df['storage_gb'], errors='coerce')
+    return normalize_billing_df(df)
 
-    # Drop rows where critical fields are null
-    before = len(df)
-    df = df.dropna(subset=['date', 'cost_usd', 'resource_id'])
-    dropped = before - len(df)
-    if dropped > 0:
-        print(f"[data_loader] Warning: Dropped {dropped} rows with null values.")
 
-    # Standardize text columns
-    df['service'] = df['service'].str.strip()
-    df['region'] = df['region'].str.strip()
-    df['resource_id'] = df['resource_id'].str.strip()
-    df['status'] = df['status'].str.strip().str.capitalize()
+def load_uploaded_data(uploaded_file):
+    """Load and normalize a CSV uploaded through Streamlit file_uploader."""
+    try:
+        df = pd.read_csv(uploaded_file)
+    except Exception as e:
+        raise ValueError(f"Could not read uploaded CSV: {e}")
 
-    # Sort by date
-    df = df.sort_values('date').reset_index(drop=True)
-
-    return df
+    return normalize_billing_df(df)
 
 # Get dataset summary
 def get_data_summary(df):
